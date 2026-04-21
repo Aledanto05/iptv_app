@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         restoreInputs()
         setupActions()
         applyFilters()
+        loadDefaultPlaylist()
     }
 
     private fun setupPlayer() {
@@ -265,4 +266,19 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         player.release()
     }
+    private fun loadDefaultPlaylist() {
+    thread {
+        try {
+            val text = URL(DEFAULT_M3U_URL).readText()
+            val parsed = M3UParser.parse(text)
+            runOnUiThread {
+                loadChannels(parsed)
+            }
+        } catch (e: Exception) {
+            runOnUiThread {
+                showError("Errore caricamento automatico playlist")
+            }
+        }
+    }
+}
 }
