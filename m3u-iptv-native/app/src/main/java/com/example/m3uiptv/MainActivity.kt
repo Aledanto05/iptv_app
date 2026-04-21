@@ -15,7 +15,7 @@ import java.net.URL
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
-
+    private val DEFAULT_M3U_URL = "http://45.155.225.210:80//get.php?username=gennarofico&password=sasy&type=m3u_plus"
     private lateinit var binding: ActivityMainBinding
     private lateinit var player: ExoPlayer
     private lateinit var store: PrefStore
