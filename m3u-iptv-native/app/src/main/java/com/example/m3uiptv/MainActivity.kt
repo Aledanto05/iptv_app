@@ -1,10 +1,7 @@
 package com.example.m3uiptv
 
-import android.net.Uri
 import android.os.Bundle
-import android.widget.ArrayAdapter
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.KeyEvent
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.media3.common.MediaItem
@@ -15,237 +12,154 @@ import java.net.URL
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
-    private val DEFAULT_M3U_URL = "http://45.155.225.210:80//get.php?username=gennarofico&password=sasy&type=m3u_plus"
+
     private lateinit var binding: ActivityMainBinding
     private lateinit var player: ExoPlayer
-    private lateinit var store: PrefStore
 
     private var channels: List<Channel> = emptyList()
-    private var filtered: List<Channel> = emptyList()
-    private var favorites: MutableSet<String> = mutableSetOf()
-    private var selectedId: String? = null
+    private var filteredChannels: List<Channel> = emptyList()
+    private var selectedIndex: Int = -1
 
-    private var currentGroup: String = "Tutti i gruppi"
-    private var currentSort: String = "Per nome"
-    private var currentTab: String = "Tutti"
+    // INSERISCI QUI IL TUO URL AUTORIZZATO
+    private val DEFAULT_M3U_URL = "http://45.155.225.210:80//get.php?username=gennarofico&password=sasy&type=m3u_plus"
 
     private lateinit var adapter: ChannelAdapter
-
-    private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            try {
-                val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                binding.rawInput.setText(text)
-                loadChannels(M3UParser.parse(text))
-            } catch (_: Exception) {
-                showError("Non sono riuscito a leggere il file selezionato.")
-            }
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        store = PrefStore(this)
-        favorites = store.getStrings("favorites")
-
         setupPlayer()
         setupRecycler()
-        setupSpinners()
-        restoreInputs()
-        setupActions()
-        applyFilters()
+        setupSearch()
+
         loadDefaultPlaylist()
     }
 
     private fun setupPlayer() {
         player = ExoPlayer.Builder(this).build()
         binding.playerView.player = player
+        binding.playerView.useController = false
     }
 
     private fun setupRecycler() {
         adapter = ChannelAdapter(
             items = emptyList(),
-            favoritesProvider = { favorites },
-            onClick = { channel ->
-                selectedId = channel.id
-                playChannel(channel)
-                updateCurrentInfo()
-                adapter.notifyDataSetChanged()
+            isSelected = { channel ->
+                selectedIndex in filteredChannels.indices && filteredChannels[selectedIndex].id == channel.id
             },
-            onToggleFavorite = { channel ->
-                toggleFavorite(channel)
+            onFocused = { channel ->
+                val idx = filteredChannels.indexOfFirst { it.id == channel.id }
+                if (idx != -1) {
+                    selectedIndex = idx
+                    updateSelectedInfo()
+                }
+            },
+            onClicked = { channel ->
+                val idx = filteredChannels.indexOfFirst { it.id == channel.id }
+                if (idx != -1) {
+                    selectedIndex = idx
+                    playSelectedChannel()
+                }
             }
         )
+
         binding.channelRecycler.layoutManager = LinearLayoutManager(this)
         binding.channelRecycler.adapter = adapter
     }
 
-    private fun setupSpinners() {
-        val sortAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("Per nome", "Per gruppo"))
-        binding.sortSpinner.adapter = sortAdapter
-
-        val tabAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("Tutti", "Preferiti"))
-        binding.tabSpinner.adapter = tabAdapter
+    private fun setupSearch() {
+        binding.searchInput.doAfterTextChanged {
+            applyFilter(it?.toString().orEmpty())
+        }
     }
 
-    private fun restoreInputs() {
-        binding.urlInput.setText(store.getText("url"))
-        binding.proxyInput.setText(store.getText("proxy"))
-        binding.rawInput.setText(store.getText("raw"))
-    }
+    private fun loadDefaultPlaylist() {
+        if (DEFAULT_M3U_URL.isBlank() || DEFAULT_M3U_URL == "METTI_QUI_IL_TUO_URL") {
+            showError("Inserisci il tuo URL in MainActivity.kt")
+            return
+        }
 
-    private fun setupActions() {
-        binding.loadUrlButton.setOnClickListener {
-            val m3uUrl = binding.urlInput.text.toString().trim()
-            val proxy = binding.proxyInput.text.toString().trim()
+        thread {
+            try {
+                val text = URL(DEFAULT_M3U_URL).readText()
+                val parsed = M3UParser.parse(text)
 
-            store.saveText("url", m3uUrl)
-            store.saveText("proxy", proxy)
-
-            if (m3uUrl.isBlank()) {
-                showError("Inserisci un link M3U valido.")
-                return@setOnClickListener
-            }
-
-            thread {
-                try {
-                    val finalUrl = if (proxy.isNotBlank()) proxy + Uri.encode(m3uUrl) else m3uUrl
-                    val text = URL(finalUrl).readText()
-                    val parsed = M3UParser.parse(text)
-                    runOnUiThread { loadChannels(parsed) }
-                } catch (_: Exception) {
-                    runOnUiThread {
-                        showError("Impossibile leggere l'URL direttamente. Prova con file M3U, testo incollato o proxy CORS.")
+                runOnUiThread {
+                    if (parsed.isEmpty()) {
+                        showError("Nessun canale trovato nella playlist.")
+                        return@runOnUiThread
                     }
+
+                    hideError()
+                    channels = parsed
+                    filteredChannels = parsed
+                    selectedIndex = 0
+                    adapter.update(filteredChannels)
+                    playSelectedChannel()
+                    binding.channelRecycler.post {
+                        binding.channelRecycler.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    showError("Errore nel caricamento automatico della playlist.")
                 }
             }
         }
-
-        binding.pickFileButton.setOnClickListener {
-            filePicker.launch("*/*")
-        }
-
-        binding.loadTextButton.setOnClickListener {
-            val raw = binding.rawInput.text.toString()
-            store.saveText("raw", raw)
-            if (raw.isBlank()) {
-                showError("Incolla il contenuto della playlist M3U.")
-                return@setOnClickListener
-            }
-            loadChannels(M3UParser.parse(raw))
-        }
-
-        binding.searchInput.doAfterTextChanged {
-            applyFilters()
-        }
-
-        binding.groupSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { selected ->
-            currentGroup = selected
-            applyFilters()
-        })
-
-        binding.sortSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { selected ->
-            currentSort = selected
-            applyFilters()
-        })
-
-        binding.tabSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { selected ->
-            currentTab = selected
-            applyFilters()
-        })
-
-        binding.favoriteButton.setOnClickListener {
-            val current = channels.find { it.id == selectedId } ?: return@setOnClickListener
-            toggleFavorite(current)
-        }
     }
 
-    private fun loadChannels(parsed: List<Channel>) {
-        if (parsed.isEmpty()) {
-            showError("Nessun canale trovato nella playlist.")
-            return
-        }
-        hideError()
-        channels = parsed
-        selectedId = parsed.first().id
-        favorites.clear()
-        store.saveStrings("favorites", favorites)
-        refreshGroupSpinner()
-        applyFilters()
-        playChannel(parsed.first())
-        updateCurrentInfo()
-        Toast.makeText(this, "Canali caricati: ${parsed.size}", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun refreshGroupSpinner() {
-        val groups = listOf("Tutti i gruppi") + channels.map { it.group.ifBlank { "Senza gruppo" } }.distinct().sorted()
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, groups)
-        binding.groupSpinner.adapter = adapter
-    }
-
-    private fun applyFilters() {
-        var list = channels.toList()
-
-        if (currentGroup != "Tutti i gruppi") {
-            list = list.filter { it.group == currentGroup }
-        }
-
-        val q = binding.searchInput.text.toString().trim().lowercase()
-        if (q.isNotBlank()) {
-            list = list.filter {
+    private fun applyFilter(query: String) {
+        filteredChannels = if (query.isBlank()) {
+            channels
+        } else {
+            val q = query.trim().lowercase()
+            channels.filter {
                 it.name.lowercase().contains(q) ||
                 it.group.lowercase().contains(q) ||
                 it.metaName.lowercase().contains(q)
             }
         }
 
-        if (currentTab == "Preferiti") {
-            list = list.filter { favorites.contains(it.id) }
-        }
+        selectedIndex = if (filteredChannels.isNotEmpty()) 0 else -1
+        adapter.update(filteredChannels)
 
-        list = when (currentSort) {
-            "Per gruppo" -> list.sortedWith(compareBy({ it.group }, { it.name }))
-            else -> list.sortedBy { it.name }
+        if (selectedIndex != -1) {
+            updateSelectedInfo()
+        } else {
+            binding.currentTitle.text = "Nessun canale selezionato"
+            binding.currentGroup.text = ""
         }
-
-        filtered = list
-        adapter.update(filtered)
-        updateCurrentInfo()
     }
 
-    private fun playChannel(channel: Channel) {
+    private fun playSelectedChannel() {
+        if (selectedIndex !in filteredChannels.indices) return
+
+        val channel = filteredChannels[selectedIndex]
+        binding.currentTitle.text = channel.name
+        binding.currentGroup.text = channel.group
+
         val mediaItem = MediaItem.fromUri(channel.url)
         player.setMediaItem(mediaItem)
         player.prepare()
         player.playWhenReady = true
-    }
 
-    private fun updateCurrentInfo() {
-        val current = channels.find { it.id == selectedId }
-        if (current == null) {
-            binding.currentTitle.text = "Nessun canale selezionato"
-            binding.currentGroup.text = ""
-            binding.favoriteButton.text = "Aggiungi preferito"
-            return
-        }
-
-        binding.currentTitle.text = current.name
-        binding.currentGroup.text = current.group
-        binding.favoriteButton.text = if (favorites.contains(current.id)) "Rimuovi preferito" else "Aggiungi preferito"
-    }
-
-    private fun toggleFavorite(channel: Channel) {
-        if (favorites.contains(channel.id)) {
-            favorites.remove(channel.id)
-        } else {
-            favorites.add(channel.id)
-        }
-        store.saveStrings("favorites", favorites)
         adapter.notifyDataSetChanged()
-        updateCurrentInfo()
+        scrollToSelection()
+    }
+
+    private fun updateSelectedInfo() {
+        if (selectedIndex !in filteredChannels.indices) return
+        val channel = filteredChannels[selectedIndex]
+        binding.currentTitle.text = channel.name
+        binding.currentGroup.text = channel.group
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun scrollToSelection() {
+        if (selectedIndex !in filteredChannels.indices) return
+        binding.channelRecycler.scrollToPosition(selectedIndex)
     }
 
     private fun showError(msg: String) {
@@ -257,6 +171,34 @@ class MainActivity : AppCompatActivity() {
         binding.errorText.visibility = android.view.View.GONE
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    if (filteredChannels.isNotEmpty()) {
+                        selectedIndex = (selectedIndex + 1).coerceAtMost(filteredChannels.lastIndex)
+                        playSelectedChannel()
+                        return true
+                    }
+                }
+
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    if (filteredChannels.isNotEmpty()) {
+                        selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                        playSelectedChannel()
+                        return true
+                    }
+                }
+
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    playSelectedChannel()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onStop() {
         super.onStop()
         player.pause()
@@ -266,19 +208,4 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         player.release()
     }
-    private fun loadDefaultPlaylist() {
-    thread {
-        try {
-            val text = URL(DEFAULT_M3U_URL).readText()
-            val parsed = M3UParser.parse(text)
-            runOnUiThread {
-                loadChannels(parsed)
-            }
-        } catch (e: Exception) {
-            runOnUiThread {
-                showError("Errore caricamento automatico playlist")
-            }
-        }
-    }
-}
 }
